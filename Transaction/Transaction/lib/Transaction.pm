@@ -2,18 +2,28 @@ package Transaction;
 
 our $VERSION = 1.0;
 
-my $OBJ = {};
-
-our $CHANGES = {};
-
-my $tr_id = 0;
-
-our $autocommit = 0;
-
 use AnyEvent;
 use AnyEvent::Handle;
 use Storable qw(dclone);
 use Data::Dumper;
+use IPC::Shareable qw(:lock);
+use Data::Dumper;
+
+#Our modifying object
+my $OBJ = {
+    id => undef,
+    name => undef,
+    age => undef,
+    sex => undef,
+    state => undef,
+};
+
+
+#Hashref of blocking fields during transactions
+
+my %CHANGES = ();
+
+our $autocommit = 0;
 
 my %ACTIONS = (
     select => 1,
@@ -26,8 +36,8 @@ my %ACTIONS = (
 
 my $LOG_FILE_DEFAULT = 'changes.log';
 
-my $hdl;
-
+my $hdl_obj;
+my $hdl_chg;
 sub new
 {
     my $class = shift;
@@ -45,11 +55,56 @@ sub new
 
 sub process
 {
-    my ($self, $transaction) = @_;
-    $tr_id++;
-    my $time = time;
+    my ($self, $transactions) = @_;
+    my %process;
+    $hdl_obj = tie $OBJ, 'IPC::Shareable', undef, { destroy => 1 };
+    $hdl_chg = tie %CHANGES, 'IPC::Shareable', undef, { destroy => 1 };
+    for my $tr_id(keys %{$transactions}){
+        my $pid = fork();
+        die 'Failed to fork' if !defined $pid;
+
+        if ($pid == 0) {
+            my $obj = $self->_process($tr_id, $transactions->{$tr_id});
+
+            $self->commit($tr_id, $obj) unless $autocommit;
+
+            for (keys %CHANGES){
+                $hdl_chg->lock();
+                delete $CHANGES{$_} if $CHANGES{$_} == $tr_id;
+                $hdl_chg->unlock();
+            }
+
+            print "Processed transaction $tr_id\n";
+
+            use Data::Dumper;
+            warn Dumper $OBJ;
+
+            exit;
+        }
+        $process{$pid} = $tr_id;
+        next;
+    }
+
+    while (1) {
+        my $pid = waitpid(-1, WNOHANG);
+        if ($pid > 0) {
+            my $exit_code = $?/256;
+            my $tr_id = delete $process{$pid};
+            next;
+        }
+        last if !%process;
+    }
+        
+    
+    return $OBJ;
+}
+
+sub _process
+{
+    my ($self, $tr_id, $transaction) = @_;
+
     my $obj = dclone($OBJ);
-    my $new_obj = dclone($obj);
+
     my @queries = split /\s*;\s*/, $transaction;
     for my $query(@queries){
         $query =~ /^(\w+)\s+(.+)$/;
@@ -61,16 +116,18 @@ sub process
                     #wait while field is blocked due to changes from other transaction
                 }
                 if ($action =~ /^(set|create_key|delete_key)$/){
+                    $hdl_chg->lock();
                     $CHANGES{$args[0]} = $tr_id;
+                    $hdl_chg->unlock();
                 }
-                $new_obj = $self->$action($new_obj, @args);
+                $new_obj = $self->$action($obj, @args);
                 if ($autocommit){
-                    $self->commit($tr_id, $new_obj, $obj, $time);
+                    $self->commit($tr_id, $obj);
                 }
             }
             else{
                 if ($autocommit){
-                    $self->rollback($tr_id, $time, $obj);
+                    $self->rollback($tr_id, $obj);
                 }
                 return "error: incorrect query: $query";
             }
@@ -82,33 +139,28 @@ sub process
             return "error: unsupported action: $action";
         }
     }
-    $self->commit($tr_id, $new_obj, $obj, $time) unless $autocommit;
-    for (keys %CHANGES){
-        delete $CHANGES{$_} if $CHANGES{$_} == $tr_id;
-    }
-    return $OBJ;
 }
 
 sub commit
 {
-    my ($self, $tr_id, $new_obj, $old_obj, $time) = @_;
-    my $changes = "$tr_id:$time: ";
+    my ($self, $tr_id, $new_obj) = @_;
     for (keys %CHANGES){
         if ($CHANGES{$_} == $tr_id){
-            my $new_val = $new_obj->{$_};
-            my $old_val = $old_obj->{$_};
-            $changes .= "$_ => $old_val:$new_val,";
+            #my $new_val = $new_obj->{$_};
+            #my $old_val = $old_obj->{$_};
+            #$changes .= "$_ => $old_val:$new_val,";
             if (exists $new_obj->{$_}){
+                $hdl_obj->lock();
                 $OBJ->{$_} = $new_obj->{$_};
+                $hdl_obj->unlock();
             }
             else{
+                $hdl_obj->lock();
                 delete $OBJ->{$_};
+                $hdl_obj->unlock();
             }
         }
     }
-    chop($changes);
-    $hdl->push_write($changes);
-    $hdl->push_write("\n");
 }
 
 sub rollback
@@ -116,8 +168,12 @@ sub rollback
     my ($self, $tr_id, $time, $obj) = @_;
     for (keys %CHANGES){
         if ($CHANGES{$_} == $tr_id){
+            $hdl_obj->lock();
             $OBJ->{$_} = $obj->{$_};
+            $hdl_obj->unlock();
+            $hdl_chg->lock();
             delete $CHANGES{$_};
+            $hdl_chg->unlock();
         }
     }
 }
