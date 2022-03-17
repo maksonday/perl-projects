@@ -42,13 +42,6 @@ sub new
 {
     my $class = shift;
     my $self->{log_file} = shift // $LOG_FILE_DEFAULT;
-    open(DATA,"+>>", $self->{log_file});
-    $hdl = new AnyEvent::Handle
-        fh => \*DATA,
-        on_error => sub {
-            $hdl->destroy;
-        };
-    $self->{hdl} = $hdl;
     bless $self, $class;
     return $self;
 }
@@ -65,7 +58,6 @@ sub process
 
         if ($pid == 0) {
             my $obj = $self->_process($tr_id, $transactions->{$tr_id});
-
             $self->commit($tr_id, $obj) unless $autocommit;
 
             for (keys %CHANGES){
@@ -75,10 +67,7 @@ sub process
             }
 
             print "Processed transaction $tr_id\n";
-
-            use Data::Dumper;
-            warn Dumper $OBJ;
-
+            #print Dumper $OBJ;
             exit;
         }
         $process{$pid} = $tr_id;
