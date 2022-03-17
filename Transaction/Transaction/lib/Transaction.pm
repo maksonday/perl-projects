@@ -101,9 +101,9 @@ sub _process
         if (exists $ACTIONS{$action}){
             my @args = split /\s*=>\s*/, $object;
             if ($ACTIONS{$action} == scalar @args){      
-                while ($CHANGES{$args[0]} && $CHANGES{$args[0]} != $tr_id){
+                #while ($CHANGES{$args[0]} && $CHANGES{$args[0]} != $tr_id){
                     #wait while field is blocked due to changes from other transaction
-                }
+                #}
                 if ($action =~ /^(set|create_key|delete_key)$/){
                     $hdl_chg->lock();
                     $CHANGES{$args[0]} = $tr_id;
