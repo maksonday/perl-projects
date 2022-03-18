@@ -12,7 +12,7 @@ my %transactions = (
     1 => 'set state => error; set id => 0; create_key old_state',
     2 => 'set id => 35; delete_key old_state; set id => 100; set id => 121',
     3 => 'set id => 41',
-    4 => 'set sex => m; set age => 25; create_key new_state',
+    4 => 'set sex => m; set age => 25; create_key new_state; select id',
 );
 
 my $log_file = shift;
