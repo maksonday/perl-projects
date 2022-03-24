@@ -21,7 +21,11 @@ my $OBJ = {
     sex => undef,
     state => undef,
 };
-
+my $ipc = tie 
+            $OBJ, 
+            'IPC::Shareable', 
+            undef, 
+            { destroy => 1 };
 
 #Hashref of blocking fields during transactions
 
@@ -55,50 +59,44 @@ sub process
     my ($self, $transactions) = @_;
     pipe(READER,WRITER);
     WRITER->autoflush(1);
-
+    my $pid;
     for my $tr_id(keys %{$transactions}) {
-        if (fork() == 0) {
+        $pid = fork();
+        unless ($pid) {
             my $obj = $self->_process($tr_id, $transactions->{$tr_id});
             $self->commit($tr_id, $obj) unless $autocommit;
-            print WRITER "Processed transaction $tr_id\n";
+            my $time = time;
+            print WRITER "$tr_id;$time;Processed transaction $tr_id\n";
             exit;
         }
     }
-    my ($rin,$rout) = ('');
-    vec($rin,fileno(READER),1) = 1;
-    while (1) {
-        my $read_avail = select($rout=$rin, undef, undef, 0.0);
-        if ($read_avail < 0) {
-            if (!$!{EINTR}) {
-                warn "READ ERROR: $read_avail $!\n";
-                last;
-            }
-        } elsif ($read_avail > 0) {
-            if(defined(my $line = <READER>)){
-                $self->sync($line);
-            }
-        } else {
-            #No input, do nothing
-        }
-        last if waitpid(-1,&WNOHANG) < 0;
-    }
-    close WRITER;
 
+    while(1){
+        my $res = waitpid($pid, WNOHANG);
+        if ($res){
+            last;
+        }
+        elsif (defined(my $line = <READER>)){
+            print $line;
+            $self->sync($line);      
+        }
+        close WRITER;
+    }
     return $OBJ;
 }
 
 sub sync
 {
     my ($self, $changes) = @_;
-
+    chomp $changes;
     my ($tr_id, $time, $args) = split /\s*;\s*/, $changes;
-    if ($args !~ /error/){
-        $hdl_obj->lock();
+    if ($args !~ /(error)|(Processed)/){
+        $ipc->lock(LOCK_EX|LOCK_NB);
         for (split /,/, $args){
             my ($key, $val) = split /\s*=>\s*/, $_;
-            $OBJ->{$key} = $val;
+            $OBJ->{$key} = (split /:/, $val)[1];
         }
-        $hdl_obj->unlock();
+        $ipc->unlock();
     }
     else{
         $self->rollback();
@@ -110,7 +108,7 @@ sub _process
     my ($self, $tr_id, $transaction) = @_;
     close READER;
     my $obj = dclone($OBJ);
-
+    my $new_obj = dclone($obj);
     my @queries = split /\s*;\s*/, $transaction;
 
     for my $query(@queries){
@@ -124,15 +122,15 @@ sub _process
                 if ($action =~ /^(set|create_key|delete_key)$/){
                     $CHANGES{$args[0]} = $tr_id;
                 }
-                $obj = $self->$action($obj, @args);
+                $new_obj = $self->$action($new_obj, @args);
 
                 if ($autocommit){
-                    $self->commit($tr_id, $obj);
+                    $self->commit($tr_id, $obj, $new_obj);
                 }
             }
             else{
                 if ($autocommit){
-                    $self->rollback($tr_id, $obj);
+                    $self->rollback($tr_id, $obj, $new_obj);
                 }
                 my $time = time;
                 print WRITER "$tr_id;$time;error: incorrect query: $query";
@@ -141,23 +139,26 @@ sub _process
         }
         else{
             if ($autocommit){
-                $self->rollback($tr_id, $obj);
+                $self->rollback($tr_id, $obj, $new_obj);
             }
             print STDOUT "error: unsupported action: $action";
         }
     }
+    use Data::Dumper;
+    #warn Dumper $obj;
+
 }
 
 sub commit
 {
-    my ($self, $tr_id, $new_obj) = @_;
+    my ($self, $tr_id, $obj, $new_obj) = @_;
     my $time = time;
     my $changes = "$tr_id;$time;";
     my $is_changed = 0;
     for (keys %CHANGES){
         if ($CHANGES{$_} == $tr_id){
             my $new_val = $new_obj->{$_};
-            my $old_val = $OBJ->{$_};
+            my $old_val = $obj->{$_};
             if ( ($new_val || '') ne ($old_val || '')){
                 $is_changed = 1;
                 $changes .= "$_ => ";
@@ -166,10 +167,10 @@ sub commit
                 $changes .= ',';
             }   
             if (exists $new_obj->{$_}){
-                $OBJ->{$_} = $new_obj->{$_};
+                $obj->{$_} = $new_obj->{$_};
             }
             else{
-                delete $OBJ->{$_};
+                delete $obj->{$_};
             }
         }
     }
