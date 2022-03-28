@@ -21,7 +21,6 @@ my $host_to_sock = {};
 my $req_sock = {};
 my ($NOW, @TIMERS);
 
-#my %ip_info = ();
 
 sub start_server {
 	my ($ip,$port,$cb) = @_;
@@ -78,7 +77,6 @@ sub start_connect {
             Timeout => 5,
             Autoflush => 1,
         );
-        #$ip_info{$socket_c} = $ip if defined $socket_c;
     }
     unless($socket_c) {
         delete $host_to_sock->{"$ip:$port"};
@@ -145,7 +143,7 @@ sub process_ready_socket {
                 }
             }
             else {
-                warn "Прочитали из сокета и незнаем кому отдать";
+                warn "Прочитали из сокета и не знаем кому отдать";
                 $cb->(undef, "fatal!!!");
             }
         }
@@ -191,8 +189,6 @@ sub start_loop {
 		}
 		for (keys %FDS) {
 			if (exists $FDS{$_}->{timer} and $FDS{$_}->{timer} < NOW()) {
-				#warn "Disconnected ip = $ip_info{$FDS{$_}->{socket}}";
-				#delete $ip_info{$FDS{$_}->{socket}};
 				close($FDS{$_}->{socket});
 				$s->remove($FDS{$_}->{socket});
 				my $del_fd = delete $FDS{$_};
